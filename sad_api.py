@@ -18,6 +18,8 @@ import datetime
 from moviepy.editor import VideoFileClip
 
 from src.gradio_demo import SadTalker
+from orm import *
+import time
 
 logging.basicConfig(
     # format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -29,6 +31,7 @@ logging.basicConfig(
 class MyClass:
     pass
 
+dbClient = DbClient()
 
 
 class SadRequest(BaseModel):
@@ -46,6 +49,29 @@ class SadRequest(BaseModel):
     exp_scale: float = 1.0 #expression scale
     image_url: str = ""
     audio_url: str = ""
+
+    def __json__(self):
+        return {"pose_style":self.pose_style, "size_of_image":self.size_of_image, "preprocess_type":self.preprocess_type, "is_still_mode":self.is_still_mode, "enhancer":self.enhancer,
+                "use_ref_video":self.use_ref_video, "ref_video":self.ref_video, "ref_info":self.ref_info, "use_blink":self.use_blink, "exp_scale":self.exp_scale, "image_url":self.image_url, "audio_url":self.audio_url}
+
+    @classmethod
+    def from_json(cls, json_data):
+        one = cls()
+        one.audio_url = json_data.get("audio_url")
+        one.enhancer = json_data.get("enhancer")
+        one.exp_scale = json_data.get("exp_scale")
+        one.image_url = json_data.get("image_url")
+
+        one.is_still_mode = json_data.get("is_still_mode")
+        one.pose_style = json_data.get("pose_style")
+        one.preprocess_type = json_data.get("preprocess_type")
+        one.ref_info = json_data.get("ref_info")
+
+        one.ref_video = json_data.get("ref_video")
+        one.size_of_image = json_data.get("size_of_image")
+        one.use_blink = json_data.get("use_blink")
+        one.use_ref_video = json_data.get("use_ref_video")
+        return one
 
 class SadActor:
     def __init__(self, name: str):
@@ -66,15 +92,15 @@ class SadActor:
         self.version = "sad_v2"
 
         self.sad_talker = SadTalker('checkpoints', 'src/config', lazy_load=True)
-        self.task_id = None
-        self.result = 0 # 0, unknown; -1, failed; 1: success
-        self.status = 0 #0, init/empty; 1, doing
-        self.msg = "" #error msg
-        self.result_code = 100 # based on xme. 
-        self.result_url = ""
-        self.result_file = ""
-        self.result_length = 1
-        self.sad_request = SadRequest()
+
+        #for worker thread
+        self.thread = threading.Thread(target = self.check_task)
+        self.thread.daemon = True
+        self.thread.start()
+        self.threadRunning = True
+
+    def __del__(self):
+        self.threadRunning = False
 
     def say_hello(self):
         logging.debug(f"Hello, {self.name}!")
@@ -84,29 +110,47 @@ class SadActor:
         return response.text
 
     def init_task(self, content: SadRequest):
-        self.status = 1  #locked
-        self.task_id = self.name + datetime.datetime.now().strftime("%f")
-        self.result = 0 # 0, unknown; -1, failed; 1: success
-        self.msg = "" #error msg
-        self.result_code = 100 # based on xme. 
-        self.result_url = ""
-        self.sad_request.audio_url = content.audio_url
-        self.sad_request.enhancer = content.enhancer
-        self.sad_request.image_url = content.image_url
-        self.sad_request.is_still_mode = content.is_still_mode
-        self.sad_request.pose_style = content.pose_style
-        self.sad_request.preprocess_type = content.preprocess_type
-        self.sad_request.ref_info = content.ref_info
-        self.sad_request.size_of_image = content.size_of_image
-        self.sad_request.use_blink = content.use_blink
-        self.sad_request.use_ref_video = content.use_ref_video
-        self.sad_request.ref_video = content.ref_video
-        self.sad_request.exp_scale = content.exp_scale
+        task = Task()
+        task.status = 0 #queued
+        task.task_id = datetime.datetime.now().strftime("%Y%m%d_%H_%M_%S_%f")
+        task.result = 0
+        task.msg = ""
+        task.result_code = 100
+        task.result_url = ""
+        task.param = json.dumps(content.__json__())
+        task.start_time = datetime.datetime.now()
+        task.end_time = datetime.datetime.now()
+
         logging.info("after init_task")
 
-    def start_task(self):
-        logging.info("before start_task")
-        self.do_sample()
+        #add item to db
+        dbClient.add(task)
+        return task.task_id
+
+    def check_task(self):
+        logging.info("check_task, internal thread")
+        #check db items 
+        while(self.threadRunning):
+            #check 
+            tasks = dbClient.queryByStatus(0)
+            taskRunning = len(dbClient.queryByStatus(1))
+            taskFinished = len(dbClient.queryByStatus(2))
+            logging.info(f"waiting={len(tasks)}, running={taskRunning}, finished={taskFinished}")
+
+            if(len(tasks) == 0):
+                logging.info(f"not waiting task.")
+                time.sleep(5)
+                continue
+
+            logging.info(f"start handling task={tasks[0].task_id}")
+            sad_request= SadRequest()
+            sad_request = SadRequest.from_json(json.loads(tasks[0].param))
+            task = Task()
+            task.assignAll(tasks[0])
+            self.do_sample(task, sad_request)
+            logging.info(f"finish handling task={tasks[0].task_id}")
+
+        logging.info("finishing internal thread.")
         return
 
     #download url to folder, keep the file name untouched
@@ -121,77 +165,94 @@ class SadActor:
         return file_name
 
     #action function, url is the http photo
-    def do_sample(self):
+    def do_sample(self, task:Task, sad_request:SadRequest):
         #empty? checked before, no need
          try:
-             logging.info(f"download photo file:{self.sad_request.image_url} to {self.tmp_folder}, {self.sad_request.audio_url} to {self.tmp_folder} ")
-             photo_file = self.download(self.sad_request.image_url, self.tmp_folder)
-             audio_file = self.download(self.sad_request.audio_url, self.tmp_folder)
+             logging.info(f"download photo file:{sad_request.image_url} to {self.tmp_folder}, {sad_request.audio_url} to {self.tmp_folder} ")
+             photo_file = self.download(sad_request.image_url, self.tmp_folder)
+             audio_file = self.download(sad_request.audio_url, self.tmp_folder)
              logging.info(f"downloaded photo and audio ")
              ref_video_file = ""
-             if(self.sad_request.use_ref_video and self.sad_request.ref_video != "" ) :
-                 ref_video_file = self.download(self.sad_request.ref_video, self.tmp_folder)
+             if(sad_request.use_ref_video and sad_request.ref_video != "" ) :
+                 ref_video_file = self.download(sad_request.ref_video, self.tmp_folder)
                  logging.info(f"downloaded ref video to {ref_video_file}")
 
              #start inference
-             output_video = self.sad_talker.test(photo_file, audio_file, self.sad_request.preprocess_type, self.sad_request.is_still_mode, self.sad_request.enhancer,2, \
-                                                 self.sad_request.size_of_image,self.sad_request.pose_style  \
-                                                 ,self.sad_request.exp_scale, self.sad_request.use_ref_video, ref_video_file, self.sad_request.ref_info, \
-                                                 use_blink=self.sad_request.use_blink, result_dir=self.www_folder)
+             output_video = self.sad_talker.test(photo_file, audio_file, sad_request.preprocess_type, sad_request.is_still_mode, sad_request.enhancer,2, \
+                                                 sad_request.size_of_image,sad_request.pose_style  \
+                                                 ,sad_request.exp_scale, sad_request.use_ref_video, ref_video_file, sad_request.ref_info, \
+                                                 use_blink=sad_request.use_blink, result_dir=self.www_folder)
              logging.info(f"finished inferencing, output={output_video}")
              new_output_video = output_video.replace("#", "")
              os.rename(output_video, new_output_video)
              output_video = new_output_video
 
-             self.result_file = output_video
-             video = VideoFileClip(self.result_file)
-             self.result_length = video.duration
-             logging.info(f"result video={self.result_file}, length = {self.result_length}")
+             task.result_file = output_video
+             video = VideoFileClip(task.result_file)
+             task.result_length = video.duration
+             task.width , task.height  = video.size
+             logging.info(f"result video={task.result_file}, length = {task.result_length}, size = {task.width}x{task.height}")
 
              #for output url 
-             diff = os.path.relpath(self.result_file, self.www_folder)
-             self.result_url = self.url_prefix + diff
-             logging.info(f'save_path={output_video}, www_folder={self.www_folder}, result_url={self.result_url}, diff={diff}')
-             self.result = 1
-             self.status = 0
-             self.result_code = 100
-             self.msg = "succeeded"
+             diff = os.path.relpath(task.result_file, self.www_folder)
+             task.result_url = self.url_prefix + diff
+             logging.info(f'save_path={output_video}, www_folder={self.www_folder}, result_url={task.result_url}, diff={diff}')
+             task.result = 1
+             task.status = 2
+             task.result_code = 100
+             task.msg = "succeeded"
+             task.end_time = datetime.datetime.now()
+             #update item
+             dbClient.updateByTaskId(task, task.task_id)
 
          except Exception as e:
-             logging.error(f"something wrong during task={self.task_id}, exception={repr(e)}")
-             self.result_url = ""
-             self.result = -1
-             self.status = 0
-             self.result_code = 103
-             self.msg = "something wrong during task=" + self.task_id + ", please contact admin."
+             logging.error(f"something wrong during task={task.task_id}, exception={repr(e)}")
+             task.result_url = ""
+             task.result = -1
+             task.status = 2
+             task.result_code = 104
+             task.msg = "something wrong during task=" + task.task_id + ", please contact admin."
+             task.result_file = ""
+             task.end_time = datetime.datetime.now()
+             dbClient.updateByTaskId(task, task.task_id)
+
          finally:
-             self.status = 0
+             task.status = 2
 
     def get_status(self, task_id: str):
         ret = MyClass()
-        length = 1
-        if(task_id != self.task_id):
-            #not the current task
+        ret.result_url = ""
+        tasks = dbClient.queryByTaskId(task_id)
+        task = Task()
+        if(len(tasks) == 0):
+            logging.error(f"cannot found task_id={task_id}")
             ret.result_url = ""
             ret.result_code = 200
-            ret.msg = "cannot find task_id=" + task_id
+            ret.msg = "cannot find task_id=" + task_id    
         else:
-            ret.result_url = self.result_url;
-            if(self.result == 0):
+            if(len(tasks) >= 1):
+                logging.error(f"found {len(tasks)} for task_id={task_id}, use the first one")
+            
+            task.assignAll(tasks[0])
+            if(task.result == 0 and task.status == 0):
+                ret.result_code = 101
+                ret.msg = "task(" + task_id + ") is waiting."
+            elif(task.result == 0 and task.status == 1):
                 ret.result_code = 102
                 ret.msg = "task(" + task_id + ") is running."
-            elif(self.result == 1): 
+            elif(task.result == 1): 
                 ret.result_code = 100
                 ret.msg = "task(" + task_id + ") has succeeded."
+                ret.result_url = task.result_url
 
-            elif(self.result == -1): 
-                ret.result_code = 103
+            elif(task.result == -1): 
+                ret.result_code = 104
                 ret.msg = "task(" + task_id + ") has failed."
             else:
-                ret.result_code = 103
-                ret.msg = "task(" + task_id + ") has failed for uncertainly."     
+                ret.result_code = 104
+                ret.msg = "task(" + task_id + ") has failed for uncertainty."  
         
-        retJ = {"result_url": ret.result_url, "result_code": ret.result_code, "msg": ret.msg,"api_time_consume":self.result_length, "api_time_left":0, "video_w":0, "video_h":0, "gpu_type":"", "gpu_time_estimate":0, "gpu_time_use":0}
+        retJ = {"result_url": ret.result_url, "result_code": ret.result_code, "msg": ret.msg,"api_time_consume":task.result_length, "api_time_left":0, "video_w":task.width, "video_h":task.height, "gpu_type":"", "gpu_time_estimate":0, "gpu_time_use":0}
         #retJson = json.dumps(retJ)
         logging.debug(f"get_status for task_id={task_id}, return {retJ}" )
         return retJ
@@ -206,27 +267,16 @@ sadActor = SadActor("sad_node_100")
 async def root():
     return {"message": "Hello World, sad, May God Bless You."}
 
-@app.post("/api/phototalking/startTask")
+@app.post("/sadTalker")
 async def post_t2tt(content : SadRequest):
     logging.info(f"before infer, content= {content}")
     result = MyClass()
 
-    if(sadActor.status != 0):
-        logging.warn(f"engine is busy with task={sadActor.task_id}, cannot accept more.")
-        result.task_id = ""
-        result.result_code = 203
-        result.msg = "engine is busy with task, cannot accept more."
-    else:
-        sadActor.init_task(content)
-        result.task_id = sadActor.task_id
-        result.result_code = 100
-        result.msg = "task_id=" + sadActor.task_id + " has started."
-        loop = asyncio.get_event_loop()
-        thread = threading.Thread(target = sadActor.start_task)
-        thread.daemon = True
-        thread.start()
-        
 
+    result.task_id = sadActor.init_task(content)
+    result.result_code = 100
+    result.msg = "task_id=" + result.task_id + " has been queued."
+      
     retJ = {"task_id":result.task_id, "result_code": result.result_code, "msg": result.msg}
     #response = Response(content=retJ, media_type="application/json")
     #retJson = json.dumps(retJ)
@@ -235,7 +285,7 @@ async def post_t2tt(content : SadRequest):
     #return response
     return retJ
 
-@app.get("/api/phototalking/startTask")
+@app.get("/sadTalker")
 async def get_status(taskID:str):
     logging.info(f"before startTask, taskID= {taskID}")
     return sadActor.get_status(taskID)
