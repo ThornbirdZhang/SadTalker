@@ -1,5 +1,6 @@
 import array
 import os
+from app_sadtalker import ref_video_fn
 
 #from pytorch_lightning import seed_everything
 
@@ -127,12 +128,21 @@ class SadActor:
              photo_file = self.download(self.sad_request.image_url, self.tmp_folder)
              audio_file = self.download(self.sad_request.audio_url, self.tmp_folder)
              logging.info(f"downloaded photo and audio ")
+             ref_video_file = ""
+             if(self.sad_request.use_ref_video and self.sad_request.ref_video != "" ) :
+                 ref_video_file = self.download(self.sad_request.ref_video, self.tmp_folder)
+                 logging.info(f"downloaded ref video to {ref_video_file}")
 
              #start inference
              output_video = self.sad_talker.test(photo_file, audio_file, self.sad_request.preprocess_type, self.sad_request.is_still_mode, self.sad_request.enhancer,2, \
                                                  self.sad_request.size_of_image,self.sad_request.pose_style  \
-                                                 ,self.sad_request.exp_scale, self.sad_request.use_ref_video, self.sad_request.ref_video, self.sad_request.ref_info, \
+                                                 ,self.sad_request.exp_scale, self.sad_request.use_ref_video, ref_video_file, self.sad_request.ref_info, \
                                                  use_blink=self.sad_request.use_blink, result_dir=self.www_folder)
+             logging.info(f"finished inferencing, output={output_video}")
+             new_output_video = output_video.replace("#", "")
+             os.rename(output_video, new_output_video)
+             output_video = new_output_video
+
              self.result_file = output_video
              video = VideoFileClip(self.result_file)
              self.result_length = video.duration
@@ -148,7 +158,7 @@ class SadActor:
              self.msg = "succeeded"
 
          except Exception as e:
-             logging.debug(f"something wrong during task={self.task_id}, exception={repr(e)}")
+             logging.error(f"something wrong during task={self.task_id}, exception={repr(e)}")
              self.result_url = ""
              self.result = -1
              self.status = 0
