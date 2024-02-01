@@ -129,16 +129,17 @@ class SadActor:
 
     def check_task(self):
         logging.info("check_task, internal thread")
+        dbClientThread = DbClient()
         #check db items 
         while(self.threadRunning):
             #check 
-            tasks = dbClient.queryByStatus(0)
-            taskRunning = len(dbClient.queryByStatus(1))
-            taskFinished = len(dbClient.queryByStatus(2))
+            tasks = dbClientThread.queryByStatus(0)
+            taskRunning = len(dbClientThread.queryByStatus(1))
+            taskFinished = len(dbClientThread.queryByStatus(2))
             logging.info(f"waiting={len(tasks)}, running={taskRunning}, finished={taskFinished}")
 
             if(len(tasks) == 0):
-                logging.info(f"not waiting task.")
+                logging.info(f"no waiting task.")
                 time.sleep(5)
                 continue
 
@@ -149,6 +150,8 @@ class SadActor:
             task.assignAll(tasks[0])
             self.do_sample(task, sad_request)
             logging.info(f"finish handling task={tasks[0].task_id}")
+            tasks[0].status = 1
+            dbClientThread.updateByTaskId(tasks[0], tasks[0].task_id)
 
         logging.info("finishing internal thread.")
         return
