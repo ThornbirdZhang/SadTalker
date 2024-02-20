@@ -4,6 +4,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 import logging
 import datetime
+import threading
 
 #from https://github.com/TwinSync/docs/blob/main/iPollo/api-photoacting.md
 '''
@@ -74,7 +75,7 @@ class Task(Base):
         self.end_time = other.end_time
         self.param = other.param
 
-#very simple client, no care for transaction/rollback, or lock
+#very simple client, no care for transaction/rollback. only single thread lock
 class DbClient:
     def __init__(self):
         self.engine = create_engine('mysql+mysqlconnector://root:QmKuwq8kSQ8b@localhost:3306/ipollo')
@@ -83,38 +84,45 @@ class DbClient:
         #create table
         #Base.metadata.create_all(self.engine)
         self.session = Session()
+        #for session protection
+        self.lock = threading.Lock()
 
     def __del__(self):
         self.session.close()
 
     def add(self, task : Task):
-        self.session.add(task)
-        self.session.commit()
-        logging.info(f"add taskid={task.task_id}")
+        with self.lock:
+            self.session.add(task)
+            self.session.commit()
+            logging.info(f"add taskid={task.task_id}")
 
     #in theory, there should be only one
     def queryByTaskId(self, taskID:str):
-        results = self.session.query(Task).filter_by(task_id=taskID).all()
-        logging.info(f"query for taskID={taskID}, {len(results)} objects returned.")
-        return results
+        with self.lock:
+            results = self.session.query(Task).filter_by(task_id=taskID).all()
+            logging.info(f"query for taskID={taskID}, {len(results)} objects returned.")
+            return results
 
     def queryByStatus(self, status:int):
-        results = self.session.query(Task).filter_by(status=status).all()
-        logging.info(f"query for status={status}, {len(results)} objects returned.")
-        return results
+        with self.lock:
+            results = self.session.query(Task).filter_by(status=status).all()
+            logging.info(f"query for status={status}, {len(results)} objects returned.")
+            return results
 
     #in theory, there should be only one
     def deleteByTaskId(self, taskID:str):
-        obj_to_delete = self.session.query(Task).filter_by(task_id=taskID).all()
-        logging.info(f"query for taskID={taskID}, {len(obj_to_delete)} objects to be deleted.")
-        for obj in obj_to_delete:
-            self.session.delete(obj)
-            self.session.commit()
+        with self.lock:
+            obj_to_delete = self.session.query(Task).filter_by(task_id=taskID).all()
+            logging.info(f"query for taskID={taskID}, {len(obj_to_delete)} objects to be deleted.")
+            for obj in obj_to_delete:
+                self.session.delete(obj)
+                self.session.commit()
 
     def updateByTaskId(self, task: Task, taskID:str):
-        obj_to_update = self.session.query(Task).filter_by(task_id=taskID).first()
-        if(obj_to_update == None):
-            logging.error(f"cannot update item: cannot find item, taskid = {taskID}, ")
+        with self.lock:
+            obj_to_update = self.session.query(Task).filter_by(task_id=taskID).first()
+            if(obj_to_update == None):
+                logging.error(f"cannot update item: cannot find item, taskid = {taskID}, ")
 
-        obj_to_update.assignWithoutId(task)
-        self.session.commit()
+            obj_to_update.assignWithoutId(task)
+            self.session.commit()
